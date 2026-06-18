@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Dec 20 21:12:22 2024
+
+@author: christinechesebrough
+
+Helpful preprocessing functions for nwb Python
+
+plot_power_spectra() # plots power spectra for low (.5-7 Hz) middle (8-30) and high(30-170)Hz frequency bands to inspect during preprocessing
+reref_avg() #can take a subset of chans to reref (not only all channels)
+reref_and_combine_channels() #takes a list or subset of chans to rereference separately then combines with remaining contacts
+find_white_matter_references() # finds appropriate white matter references to use for rereferencing based on PSD stability and asks for user input to define based on location in the brain
+
+
+"""
+import os, sys, re
+import numpy as np
+import mne
+from itertools import compress
+from pynwb import NWBHDF5IO
+from helpers import interp_bad_samples, combine_left_right, prep_gaze, detect_saccades_remodnav
+from tqdm import tqdm
+from scipy import ndimage
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import cv2
+import scipy.interpolate as interp
+import scipy.stats as stats
+import scipy.signal as signal
+import temporal_response_function as trf
+from mne.time_frequency import psd_array_welch
+from mne.filter import filter_data
+
+
+def plot_power_spectra(data, labels, fs_data, freq_range, pat, plot_title="Power Spectral Density (Welch)"):
+    
+    """
+    Compute and plot Power Spectral Density (PSD) for given data using Welch's method.
+
+    Parameters:
+    - data (ndarray): The bandpass-filtered data array with shape (n_channels, n_times).
+    - labels(list): List of channel labels.
+    - fs_data (float): Sampling frequency of the data.
+    - freq_range (tuple): Frequency range for the PSD (fmin, fmax).
+    - pat (str): Identifier for the patient or dataset.
+    - plot_title (str): Title for the plot").
+
+    Returns:
+    - fig: The matplotlib figure object of the PSD plot.
+    """
+    
+    # Compute the PSD using Welch's method
+    psd, freqs = psd_array_welch(
+        data, sfreq=fs_data, fmin=freq_range[0], fmax=freq_range[1],
+        n_fft=int(fs_data * 2), n_overlap=int(fs_data), average='mean'
+    )
+    
+    # Plot the PSD for each channel
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for i, label in enumerate(labels):
+        ax.plot(freqs, psd[i, :], label=label)
+    
+    # Add labels and legend
+    ax.set_title(f'{pat} {freq_range} {plot_title}', fontsize=14)
+    ax.set_xlabel('Frequency (Hz)', fontsize=12)
+    ax.set_ylabel('Power Spectral Density (dB)', fontsize=12)
+    ax.grid(True)
+    ax.legend(loc='upper right', fontsize='small')
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
+
+def reref_avg(raw, channels=None):
+    """
+    Average reference using specified channels or all good channels by default.
+
+    Parameters:
+    raw : mne.io.Raw
+        The MNE Raw object containing the EEG data.
+    channels : list of str, optional
+        A list of channel names to use for rereferencing. If None, all good channels
+        will be used (default behavior).
+
+    Returns:
+    mne.io.Raw
+        The rereferenced Raw object.
+    """
+    # Determine the channels to use for rereferencing
+    if channels is None:
+        # Use all good channels if no specific channels are provided
+        goodChans = [ch for ch in raw.ch_names if ch not in raw.info['bads']]
+    else:
+        # Ensure specified channels are not marked as bad
+        goodChans = [ch for ch in channels if ch in raw.ch_names and ch not in raw.info['bads']]
+        if not goodChans:
+            raise ValueError("No valid channels to rereference. Check channel names and bad channel list.")
+
+    return raw.set_eeg_reference(ref_channels=goodChans)
+
+
+def find_white_matter_references(pat_dir, pat, data, elec_table):
+    """
+    Finds and selects white matter electrodes to use as reference montage.
+
+    Parameters:
+    pat_dir (str): Directory to save/load white matter contacts.
+    pat (str): The patient identifier.
+    data (mne.io.Raw): Preprocessed MNE Raw object.
+    elec_table (pd.DataFrame): Table containing subject-specific electrode information.
+
+    Returns:
+    list: Selected white matter references.
+    """
+    wm_contact_file = f'{pat_dir}/wm_contacts.txt'
+
+    # Check if a white matter contact file exists
+
+    # Get subject-specific electrode data
+    elecs_subs = elec_table[elec_table.SubID == ('NS174' if pat == 'NS174_02' else pat)] # could be .Contact depending on which table you are using
+
+    # Define white matter group and filter for WM contacts
+    wm_group = ['Right-Cerebral-White-Matter', 'Left-Cerebral-White-Matter']
+    wm_contacts = elecs_subs[elecs_subs['AparcAseg_Atlas'].isin(wm_group)]['Contact'].values
+
+    # Exclude WM contacts that are defined as bad
+    wm_contacts_cleaned = [ch for ch in wm_contacts if ch not in data.info['bads']]
+    print(f"White matter contacts (cleaned): {wm_contacts_cleaned}")
+
+    # Evaluate stability and noise for each WM contact using PSD
+    wm_data = data.get_data(picks=wm_contacts_cleaned)  # Extract NumPy array
+    sfreq = data.info['sfreq']
+    wm_psd, freqs = psd_array_welch(wm_data, sfreq=sfreq, fmin=1, fmax=150)
+    mean_psd = wm_psd.mean(axis=1)
+
+    # Sort WM contacts by stability (lowest noise)
+    sorted_indices = mean_psd.argsort()
+    sorted_wm_contacts = [wm_contacts_cleaned[i] for i in sorted_indices]
+
+    # Find the location of each electrode in elecs_subs['DK_Atlas']
+    dk_labels = [
+        elecs_subs.loc[elecs_subs['Contact'] == ch, 'DK_Atlas'].values[0]
+        for ch in sorted_wm_contacts
+    ]
+
+    # Print the top 20 sorted WM contacts with their DK atlas label
+    print("\nTop 20 White Matter Contacts with DK Atlas Labels:")
+    for i, (contact, label) in enumerate(zip(sorted_wm_contacts[:20], dk_labels[:20])):
+        print(f"{i+1}. Contact: {contact}, DK Atlas Label: {label}")
+
+    # Ask for user input to define good WM contacts (2-10 depending on your goals)
+    selected_indices = input(
+        "\nEnter the indices of good WM contacts (comma-separated, e.g., 1,2,3): "
+    )
+    selected_indices = [int(idx.strip()) - 1 for idx in selected_indices.split(',')]
+    selected_wm_references = [sorted_wm_contacts[idx] for idx in selected_indices]
+
+    # Save the selected WM contacts to a text file
+    with open(wm_contact_file, 'w') as f:
+        f.writelines("\n".join(selected_wm_references))
+    print(f"Selected WM references saved to: {wm_contact_file}")
+
+    return selected_wm_references
+
+
+def reref_and_combine_channels(pat_dir, data, start_idx=None, end_idx=None, channel_list=None):
+    """
+    Re-references subsets of channels in an MNE data file and recombines them.
+
+    Parameters:
+    pat_dir (str): Directory to save intermediate and final data files.
+    data (mne.io.Raw): Preprocessed MNE Raw object.
+    start_idx (int, optional): Starting index of the first subset of channels. Defaults to None.
+    end_idx (int, optional): Ending index of the first subset of channels. Defaults to None.
+    channel_list (list, optional): List of channel names for the first subset. Defaults to None.
+
+    Returns:
+    mne.io.Raw: Combined MNE Raw object after re-referencing.
+    """
+    if channel_list:
+        # Use the provided list of channels
+        chans_to_reref = channel_list
+        print(f"Using provided channel list: {chans_to_reref}")
+    elif start_idx is not None and end_idx is not None:
+        # Use the range of channels
+        chans_to_reref = data.ch_names[start_idx:end_idx + 1]
+        print(f"Using channel range from indices {start_idx} to {end_idx}")
+    else:
+        raise ValueError("Either channel_list or both start_idx and end_idx must be provided.")
+
+    # Split the file into two separate Raw objects
+    data_1 = data.copy().pick(chans_to_reref)
+    data_2 = data.copy().pick([ch for ch in data.ch_names if ch not in chans_to_reref])
+
+    # Verify the split
+    print(f"Channels in data_1: {data_1.ch_names}")
+    print(f"Channels in data_2: {data_2.ch_names}")
+
+    # Save intermediate files
+    data_1_path = f"{pat_dir}/data_1.fif"
+    data_2_path = f"{pat_dir}/data_2.fif"
+    data_1.save(data_1_path, overwrite=True)
+    data_2.save(data_2_path, overwrite=True)
+
+    print(f"Intermediate files saved: {data_1_path}, {data_2_path}")
+
+    # Rereference each split file separately
+    data_1_reref = reref_avg(data_1)
+    data_2_reref = reref_avg(data_2)
+
+    # Verify rereferencing by inspecting the data
+    data_1_reref.plot(title="Rereferenced Data 1")
+    data_2_reref.plot(title="Rereferenced Data 2")
+
+    # Combine the channels
+    combined_raw = data_2_reref.copy().add_channels([data_1_reref], force_update_info=True)
+
+    # Save the combined file
+    combined_file_path = f"{pat_dir}/combined_reref.fif"
+    combined_raw.save(combined_file_path, overwrite=True)
+
+    # Verify the combined data
+    print("Combined file saved to:", combined_file_path)
+    print("Channels in the combined file:", combined_raw.ch_names)
+
+    # Optional: Plot the combined file to inspect
+    combined_raw.plot(title="Combined Rereferenced Data (Channel-Wise)")
+
+    return combined_raw
+
+
