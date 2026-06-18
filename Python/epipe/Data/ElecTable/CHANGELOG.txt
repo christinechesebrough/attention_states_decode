@@ -1,0 +1,71 @@
+April 26 2021 
+
+Added NS162_02, NS163, NS164, NS165, NS166, NS167, NS168, NS169, NS170 
+
+NS134 data replaced 
+
+Error in localization found in NS134 (probably during anonymization process that occurred afterwards). Has 2 Freesurfer folders. First implant lasted 1-2days and no data was recorded in that time. Electrodes were added on day 2 of patient stay. All collected data. Both NS134 and NS134_impl2 removed from table. Newly localized data for NS134_impl2 added in 
+
+*********************************************************************************
+
+June 18 2021 
+
+Add NS109, NS113, NS116, NS171, NS172 
+
+*********************************************************************************
+
+June 23 2021 
+
+Added NS173 
+
+*********************************************************************************
+
+July 9 2021 
+
+Relocalized NS163 due to poor registration to MNI305 space during reconstruction. All coordinates have been updated 
+
+*********************************************************************************
+
+December 10 2021
+
+Added CC007, LH009, NS174, NS174_02, NS174_03, NS175, NS176, NS177
+
+Removed CC001, CC002, CC005 as consent for these patients was not signed
+
+Added older subjects: NS022, NS035, NS057, NS124, NS127
+
+*********************************************************************************
+
+January 5 2022
+
+Added CC008
+
+*********************************************************************************
+
+April 19 2022
+
+Added NS178 and NS155_02
+
+*********************************************************************************
+
+April 25 2022
+
+Added LH010
+
+*********************************************************************************
+
+July 21 2023
+
+Added NS194
+
+*********************************************************************************
+
+July 24 2023
+
+Added NS192, NS193
+
+*********************************************************************************
+
+August 24 2023
+
+Re-uploaded NS184_02,LH012
